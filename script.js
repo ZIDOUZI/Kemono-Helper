@@ -1,35 +1,50 @@
 // ==UserScript==
 // @name         Kemono助手
-// @version      2.0.0
+// @version      2.0.18
 // @description  提供更好的Kemono使用体验
 // @author       ZIDOUZI
 // @match        https://*.kemono.party/*
 // @match        https://*.kemono.su/*
 // @icon         https://kemono.su/static/favicon.ico
 // @require      https://cdn.jsdelivr.net/npm/sweetalert2@11
+// @require      https://kit.fontawesome.com/101092ae56.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
+// @license      GPL-3.0
 // @namespace https://greasyfork.org/users/448292
-// @downloadURL https://update.greasyfork.org/scripts/468718/Kemono%E5%8A%A9%E6%89%8B.user.js
-// @updateURL https://update.greasyfork.org/scripts/468718/Kemono%E5%8A%A9%E6%89%8B.meta.js
 // ==/UserScript==
 
 (async function () {
+    'use strict';
+    await main().catch(function (error) {
+        console.log(error)
+        alert(`Kemono助手发生错误: ${error.status} ${error.statusText}`)}
+    );
+})();
+
+async function main() {
 
     const language = navigator.language || navigator.userLanguage;
 
     const domain = window.location.href.match(/https:\/\/([^/]+)/)[1];
+
+    const menuId = GM_registerMenuCommand('Kemono助手设置', showDialog);
 
     const data = await (async () => {
         let _vimMode = GM_getValue('vimMode', false)
         let _rpc = GM_getValue('rpc', 'http://localhost:6800/jsonrpc')
         let _token = GM_getValue('token', '')
         let _dir = GM_getValue('dir', '')
-        if (_dir === '') {
-            _dir = await fetchDownloadDir(_rpc, _token) + "/kemono/{service}-{artist_id}/{post}-{post_id}/{index0}.{extension}";
+        let _first = GM_getValue('first', true)
+        if (_dir === '' && !_first) {
+            try {
+                _dir = await fetchDownloadDir(_rpc, _token) + "/kemono/{service}-{artist_id}/{post}-{post_id}/{index}_{auto_named}.{extension}";
+            } catch (e) {
+                // ignore
+            }
             GM_setValue('dir', _dir);
         }
         return {
@@ -51,29 +66,47 @@
             }, get dir() {
                 return _dir;
             }, set dir(value) {
+                // if (/[:*?"<>|]/g.test(value)) {
+                //     alert('下载目录中不能包含以下字符： : * ? " < > |\n您可以选择换为全角字符')
+                //     return;
+                // }
                 _dir = value;
                 GM_setValue('dir', value);
             }, format(date) {
-                const year = date.getFullYear();
-                const month = date.getMonth() + 1;
-                const day = date.getDate();
-                const hour = date.getHours();
-                const minute = date.getMinutes();
-                const second = date.getSeconds();
-                return `${year}-${month}-${day} ${hour}-${minute}-${second}`; // TODO: custom format
-            }, formatDir(post, index, name, artist = undefined, padStart = 3) {
+                return date.toISOString().split('.')[0].replace('T', ' ').replaceAll(':', '-')
+            }, formatDir(post, index, name, extension, padStart = 3) {
                 const indexString = index.toString().padStart(padStart, '0');
+                const shouldReplace = /^([0-9a-fA-F]{4}-?){8}$/.test(name)
+                    || (/^[a-zA-Z0-9]+$/.test(name) && post.service === "fanbox") || name.length + extension.length > 255;
+                if (name.length + extension.length > 255) name = name.slice(0, 255 - extension.length);
                 return _dir
-                    .replace('{service}', post.service)
-                    .replace('{artist_id}', post.user)
-                    .replace('{date}', this.format(new Date(Date.parse(post.published))))
-                    .replace('{post}', post.title)
-                    .replace('{post_id}', post.id)
-                    .replace('{time}', this.format(new Date()))
-                    .replace('{index0}', indexString)
-                    .replace('{index}', index === 0 ? '' : indexString)
-                    .replace('{name}', name.slice(0, name.lastIndexOf(".")))
-                    .replace('{extension}', name.slice(name.lastIndexOf(".") + 1));
+                    .replaceAll(/\{js:(.*)#}/g, function (_, code) {
+                        return eval(code);
+                    })
+                    .replaceAll(/[\/\\]/g, '≸∱').replaceAll(':', '∱≸')
+                    .replaceAll('{service}', post.service)
+                    .replaceAll('{artist_id}', post.user)
+                    .replaceAll('{date}', this.format(new Date(Date.parse(post.published))))
+                    .replaceAll('{post}', post.title)
+                    .replaceAll('{post_id}', post.id)
+                    .replaceAll('{time}', this.format(new Date()))
+                    .replaceAll('{index0}', indexString)
+                    .replaceAll('{index}', index === 0 ? '' : indexString)
+                    .replaceAll('{auto_named}', shouldReplace ? indexString : name)
+                    .replaceAll('{name}', name)
+                    .replaceAll('{extension}', extension)
+                    // avoid illegal characters in windows folder and file name
+                    .replaceAll(':', '：')
+                    .replaceAll('*', '＊')
+                    .replaceAll('?', '？')
+                    .replaceAll('"', '“')
+                    .replaceAll('<', '《')
+                    .replaceAll('>', '》')
+                    .replaceAll('|', '｜')
+                    .replaceAll('/', '／')
+                    .replaceAll('\\', '＼')
+                    .replaceAll('≸∱', '\\').replace('∱≸', ':')
+                    .replaceAll(/[\s.]+\\/g, '\\'); // remove space and dot
             }
         }
     })()
@@ -127,9 +160,12 @@
     }
 
     async function downloadPostContent(post) {
-        if (Object.keys(post.file).length !== 0) post.attachments.push(post.file)
-        for (let [i, {name, path}] of post.attachments.entries()) {
-            await downloadContent(data.rpc, data.token, data.formatDir(post, i, name), `https://${domain}/data${path}`);
+        if (Object.keys(post.file).length !== 0) post.attachments.unshift(post.file)
+        const padStart = Math.max(3, post.attachments.length.toString().length);
+        for (let [i, { name, path }] of post.attachments.entries()) {
+            const extension = path.split('.').pop();
+            const filename = name.replace(/\.\w+$/, '');
+            await downloadContent(data.rpc, data.token, data.formatDir(post, i, filename, extension, padStart), `https://${domain}/data${path}`);
         }
     }
 
@@ -139,7 +175,7 @@
     if (window.location.href.match(/\/user\/\w+\/post\/\w+/)) {
         mode = 'post';
         header = document.querySelector('.post__actions');
-        listener = async () => await downloadPostContent(await (await fetch(`/api/v1/${window.location.pathname}`)).json())
+        listener = async () => await downloadPostContent(await (await fetch(`/api/v1${window.location.pathname}`)).json())
     } else if (window.location.href.match(/\/user\/\w+/)) {
         mode = 'user';
         header = document.querySelector('.user-header__actions');
@@ -168,21 +204,40 @@
     if (header) {
         const settings = document.createElement('button');
         settings.classList.add(`${mode}-header__settings`);
-        settings.textContent = '⚙';
-        settings.style = header.style
+        settings.style.backgroundColor = 'transparent';
+        settings.style.borderColor = 'transparent';
+        settings.style.color = 'white';
+        settings.innerHTML = `
+            <i class="fa-solid fa-gear ${mode}-header_settings-icon"/>
+        `;
         settings.addEventListener('click', showDialog);
 
         const download = document.createElement('button');
         download.classList.add(`${mode}-header__download`);
+        download.style.backgroundColor = 'transparent';
+        download.style.borderColor = 'transparent';
+        download.style.color = 'white';
         download.innerHTML = `
-            <span class="${mode}-header__download-icon">⬇</span>
+            <i class="fa-solid fa-download ${mode}-header_download-icon"/>
             <span class="${mode}-header__download-text">下载</span>
         `;
 
-        download.addEventListener('click', listener);
+        download.addEventListener('click', async function () {
+            download.innerHTML = `
+                <i class="fa-solid fa-spinner fa-spin-pulse ${mode}-header_download-icon"></i>
+                <span class="${mode}-header__download-text">下载中...</span>
+            `;
+            await listener();
+            download.innerHTML = `
+                <i class="fa-solid fa-check ${mode}-header_download-icon"/>
+                <span class="${mode}-header__download-text">下载/推送完成</span>
+            `;
+        }, { once: true });
 
         header.appendChild(settings);
         header.appendChild(download);
+    } else if (mode !== undefined) {
+        alert('未找到插入位置, 请将本页源代码发送给开发者以解决此问题');
     }
 
     function showDialog() {
@@ -198,8 +253,20 @@
                 </div>
                 <div>
                     <label for="dir">下载目录</label>
+                    <i class="fa-solid fa-info-circle" title="支持的变量:
+                     {service}: 服务器, 如fanbox
+                     {artist_id}: 作者ID
+                     {date}: 发布时间
+                     {post}: 作品标题
+                     {post_id}: 作品ID
+                     {time}: 下载时间
+                     {index0}: 从0开始的序号。cover将编号为0
+                     {index}: 从1开始的序号。cover的编号为空白
+                     {auto_named}: 当文件名为uuid时将使用空命名。否则使用文件名
+                     {name}: 文件名 
+                     {extension}: 文件扩展名。必须带有此项
+                     {js:...#}: js代码. 可用参数请参考源代码85行处formatDir方法"></i>
                     <textarea cols="20" id="dir">${data.dir}</textarea>
-                    <icon title=""></icon>
                 </div>
                 <div>
                     <label for="vimMode">Vim模式</label>
@@ -217,7 +284,7 @@
         });
     }
 
-})();
+}
 
 async function replaceAsync(str, regex, asyncFn) {
     const promises = [];
@@ -244,10 +311,10 @@ async function getKemonoUrl(url) {
                     if (response.status === 200) {
                         resolve(JSON.parse(response.responseText))
                     } else {
-                        reject({status: response.status, statusText: response.statusText})
+                        reject({ status: response.status, statusText: response.statusText })
                     }
                 }, onerror: function (response) {
-                    reject({status: response.status, statusText: response.statusText})
+                    reject({ status: response.status, statusText: response.statusText })
                 }
             })
         })
@@ -312,7 +379,7 @@ async function getPosts(path, order = 0) {
             await new Promise(resolve => setTimeout(resolve, 60000))
             continue;
         }
-        if (response.status !== 200) throw {status: response.status, statusText: response.statusText}
+        if (response.status !== 200) throw { status: response.status, statusText: response.statusText }
         const items = await response.json();
         posts.push(...items);
         if (items.length < 50) break;
@@ -333,12 +400,12 @@ async function downloadContent(rpc, token, file, ...url) {
     const out = file.slice(dir.length);
     const params = token === undefined
         ? out === ""
-            ? [url, {"dir": dir}]
-            : [url, {"dir": dir, "out": out}]
+            ? [url, { "dir": dir }]
+            : [url, { "dir": dir, "out": out }]
         : out === ""
-            ? [`token:${token}`, url, {"dir": dir}]
-            : [`token:${token}`, url, {"dir": dir, "out": out}]
-    return new Promise((resolve, reject) => {
+            ? [`token:${token}`, url, { "dir": dir }]
+            : [`token:${token}`, url, { "dir": dir, "out": out }]
+    return new Promise((resolve) => {
         GM_xmlhttpRequest({
             method: "POST", url: rpc, data: JSON.stringify({
                 jsonrpc: "2.0", id: `kemono-${crypto.randomUUID()}`, method: "aria2.addUri", params: params
@@ -346,10 +413,10 @@ async function downloadContent(rpc, token, file, ...url) {
                 if (response.status === 200) {
                     resolve(JSON.parse(response.responseText))
                 } else {
-                    reject({status: response.status, statusText: response.statusText})
+                    console.log(`添加下载任务失败: ${response.status} ${response.statusText}`)
                 }
             }, onerror: function (response) {
-                reject({status: response.status, statusText: response.statusText})
+                console.log(`添加下载任务失败: ${response.status} ${response.statusText}`)
             }
         })
     })
@@ -366,10 +433,10 @@ async function fetchDownloadDir(rpc, token) {
                 if (response.status === 200) {
                     resolve(JSON.parse(response.responseText))
                 } else {
-                    reject({status: response.status, statusText: response.statusText})
+                    reject({ status: response.status, statusText: response.statusText })
                 }
             }, onerror: function (response) {
-                reject({status: response.status, statusText: response.statusText})
+                reject({ status: response.status, statusText: response.statusText })
             }
         })
     }).then(function (result) {
