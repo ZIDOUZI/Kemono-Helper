@@ -73,7 +73,8 @@ async function main() {
                 _dir = value;
                 GM_setValue('dir', value);
             }, format(date) {
-                return date.toISOString().split('.')[0].replace('T', ' ').replaceAll(':', '-')
+                //return date.toISOString().split('.')[0].replace('T', ' ').replaceAll(':', '-')
+                return date.toISOString().split('.')[0].replace('T', ' ').split(' ')[0]//只保留日期,不保留时间
             }, formatDir(post, index, name, extension, padStart = 3) {
                 const indexString = index.toString().padStart(padStart, '0');
                 const shouldReplace = /^([0-9a-fA-F]{4}-?){8}$/.test(name)
