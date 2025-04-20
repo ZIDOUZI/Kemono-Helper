@@ -1,10 +1,11 @@
 // ==UserScript==
 // @name         Kemono助手
-// @version      2.0.18
+// @version      2.2.0
 // @description  提供更好的Kemono使用体验
 // @author       ZIDOUZI
 // @match        https://*.kemono.party/*
 // @match        https://*.kemono.su/*
+// @match        https://*.nekohouse.su/*
 // @icon         https://kemono.su/static/favicon.ico
 // @require      https://cdn.jsdelivr.net/npm/sweetalert2@11
 // @require      https://kit.fontawesome.com/101092ae56.js
@@ -18,12 +19,30 @@
 // ==/UserScript==
 
 (async function () {
-    'use strict';
-    await main().catch(function (error) {
-        console.log(error)
-        alert(`Kemono助手发生错误: ${error.status} ${error.statusText}`)}
-    );
+    try {
+        const root = document.querySelector('#root')
+        const observer = new MutationObserver(async function (mutations) {
+            observer.disconnect();
+            for (const mutation of mutations) {
+                if (mutation.type === "childList" && mutation.addedNodes.length > 0 && await wrapper() !== undefined) break
+            }
+        });
+        observer.observe(root, { childList: true, subtree: true })
+    } catch (e) {
+        console.log(e)
+        await wrapper()
+    }
 })();
+
+async function wrapper() {
+    try {
+        return await main()
+    } catch (error) {
+        console.log(error)
+        alert(`Kemono助手发生错误: ${error.status} ${error.statusText}`)
+        return undefined
+    }
+}
 
 async function main() {
 
@@ -31,7 +50,7 @@ async function main() {
 
     const domain = window.location.href.match(/https:\/\/([^/]+)/)[1];
 
-    const menuId = GM_registerMenuCommand('Kemono助手设置', showDialog);
+    const menuId = GM_registerMenuCommand('Kemono助手设置', showSettingsDialog);
 
     const data = await (async () => {
         let _vimMode = GM_getValue('vimMode', false)
@@ -39,12 +58,10 @@ async function main() {
         let _token = GM_getValue('token', '')
         let _dir = GM_getValue('dir', '')
         let _first = GM_getValue('first', true)
-        if (_dir === '' && !_first) {
-            try {
-                _dir = await fetchDownloadDir(_rpc, _token) + "/kemono/{service}-{artist_id}/{post}-{post_id}/{index}_{auto_named}.{extension}";
-            } catch (e) {
-                // ignore
-            }
+        let _saveSource = GM_getValue('saveSource', false)
+        if (_dir === '' && !_first) try {
+            _dir = await fetchDownloadDir(_rpc, _token) + "/kemono/{service}-{artist_id}/{post}-{post_id}/{index}_{auto_named}.{extension}";
+        } finally {
             GM_setValue('dir', _dir);
         }
         return {
@@ -72,16 +89,26 @@ async function main() {
                 // }
                 _dir = value;
                 GM_setValue('dir', value);
+            }, get saveSource() {
+                return _saveSource
+            }, set saveSource(value) {
+                _saveSource = value
+                GM_setValue('saveSource', value)
             }, format(date) {
                 return date.toISOString().split('.')[0].replace('T', ' ').replaceAll(':', '-')
-            }, formatDir(post, index, name, extension, padStart = 3) {
+            }, formatDir(post, index, name, extension, padStart = 3, pattern = undefined) {
                 const indexString = index.toString().padStart(padStart, '0');
                 const shouldReplace = /^([0-9a-fA-F]{4}-?){8}$/.test(name)
                     || (/^[a-zA-Z0-9]+$/.test(name) && post.service === "fanbox") || name.length + extension.length > 255;
                 if (name.length + extension.length > 255) name = name.slice(0, 255 - extension.length);
-                return _dir
-                    .replaceAll(/\{js:(.*)#}/g, function (_, code) {
-                        return eval(code);
+                return (pattern || _dir)
+                    .replaceAll(/\{js:(.*?)#}/g, function (_, code) {
+                        try {
+                            return eval(code);
+                        } catch (e) {
+                            console.error('JS占位符代码执行错误:', e);
+                            return ''; // 返回空字符串防止路径错误
+                        }
                     })
                     .replaceAll(/[\/\\]/g, '≸∱').replaceAll(':', '∱≸')
                     .replaceAll('{service}', post.service)
@@ -105,8 +132,8 @@ async function main() {
                     .replaceAll('|', '｜')
                     .replaceAll('/', '／')
                     .replaceAll('\\', '＼')
-                    .replaceAll('≸∱', '\\').replace('∱≸', ':')
-                    .replaceAll(/[\s.]+\\/g, '\\'); // remove space and dot
+                    .replaceAll('≸∱', '/').replace('∱≸', ':')
+                    .replaceAll(/[\s.]+[\/\\]/g, '/'); // remove space and dot
             }
         }
     })()
@@ -115,7 +142,7 @@ async function main() {
     if (postContent) {
         replaceAsync(postContent.innerHTML, /(?<!a href="|<a [^>]+">)(https?:\/\/[^\s<]+)/g, async function (match) {
             let [service, id, post] = await getKemonoUrl(match);
-            if (service === null) return `<a href="${match}" target="_blank">${match}</a>`;
+            if (service === undefined) return `<a href="${match}" target="_self">${match}</a>`;
             id = id || window.location.href.match(/\/user\/(\d+)/)[1];
             const domain = window.location.href.match(/https:\/\/([^/]+)/)[1];
             const url = `${service}/user/${id}${post ? `/post/${post}` : ""}`;
@@ -159,88 +186,56 @@ async function main() {
         }
     }
 
-    async function downloadPostContent(post) {
-        if (Object.keys(post.file).length !== 0) post.attachments.unshift(post.file)
+    async function downloadPostContent(post, params = undefined) {
+        // 添加属性校验
+        if (!post?.service || !post?.user || !post?.id) {
+            console.error('无效的post数据:', post);
+            return;
+        }
+        const parsedPublished = Date.parse(post.published);
+        if (isNaN(parsedPublished)) {
+            console.error('Skipping post due to invalid published date:', post.id);
+            return;
+        }
+        if (Object.keys(post.file).length !== 0) post.attachments.unshift(post.file);
         const padStart = Math.max(3, post.attachments.length.toString().length);
-        for (let [i, { name, path }] of post.attachments.entries()) {
-            const extension = path.split('.').pop();
+        const published = new Date(parsedPublished);
+
+        // 解析日期参数并检查有效性
+        const after = params.after ? new Date(params.after) : null;
+        const before = params.before ? new Date(params.before) : null;
+        if (after && isNaN(after.getTime())) {
+            console.error('Invalid "after" date:', params.after);
+            return;
+        }
+        if (before && isNaN(before.getTime())) {
+            console.error('Invalid "before" date:', params.before);
+            return;
+        }
+        if (after && published < after) return;
+        if (before && published > before) return;
+        if (!params.after.isEmpty() && published < new Date(params.after)) return;
+        if (!params.before.isEmpty() && published > new Date(params.before)) return;
+        if (!params.regex.isEmpty() && !new RegExp(params.regex).test(post.title)) return;
+        for (let [i, {name, path}] of post.attachments.entries()) {
+            let extension = path.split('.').pop();
+            if (extension == "bin" || extension == "zip") extension = name.split('.').pop();
+            if (!params.extension.includes(extension) && !params.extension.includes('*')) continue;
             const filename = name.replace(/\.\w+$/, '');
-            await downloadContent(data.rpc, data.token, data.formatDir(post, i, filename, extension, padStart), `https://${domain}/data${path}`);
+            const dir = data.formatDir(post, i, filename, extension, padStart, params.pattern);
+            if (!params.js.isEmpty() && !eval(params.js)) continue;
+            await downloadContent(data.rpc, data.token, dir, `https://${domain}/data${path}`);
+        }
+        if (params.saveSource) {
+            await downloadContent(
+                data.rpc, data.token,
+                data.formatDir(post, 0, 'content', 'json', 0, params.pattern),
+                `https://${domain}/api/v1/${post.service}/user/${post.user}/post/${post.id}`);
+            // aria2 may cannot download this successfully. error 22
         }
     }
 
-    let mode;
-    let header;
-    let listener;
-    if (window.location.href.match(/\/user\/\w+\/post\/\w+/)) {
-        mode = 'post';
-        header = document.querySelector('.post__actions');
-        listener = async () => await downloadPostContent(await (await fetch(`/api/v1${window.location.pathname}`)).json())
-    } else if (window.location.href.match(/\/user\/\w+/)) {
-        mode = 'user';
-        header = document.querySelector('.user-header__actions');
-        listener = async () => {
-            for (let post of await getPosts(window.location.pathname)) await downloadPostContent(post)
-        }
-    } else if (window.location.href.match(/\/favorites/)) {
-        mode = 'favor';
-        header = document.querySelector('.dropdowns');
-        const type = document.querySelector('.dropdowns>select:nth-child(2)>option:nth-child(1)');
-        listener = async () => {
-            const posts = type.selected !== true
-                ? await (await fetch(`/api/v1/account/favorites?type=post`)).json()
-                : await (async () => {
-                    const response = await fetch(`/api/v1/account/favorites?type=artist`)
-                    const result = []
-                    for (const artist of await response.json()) {
-                        result.push(...await getPosts(`${artist.service}/user/${artist.id}`))
-                    }
-                    return result;
-                })()
-            for (let post of posts) await downloadPostContent(post)
-        }
-    }
-
-    if (header) {
-        const settings = document.createElement('button');
-        settings.classList.add(`${mode}-header__settings`);
-        settings.style.backgroundColor = 'transparent';
-        settings.style.borderColor = 'transparent';
-        settings.style.color = 'white';
-        settings.innerHTML = `
-            <i class="fa-solid fa-gear ${mode}-header_settings-icon"/>
-        `;
-        settings.addEventListener('click', showDialog);
-
-        const download = document.createElement('button');
-        download.classList.add(`${mode}-header__download`);
-        download.style.backgroundColor = 'transparent';
-        download.style.borderColor = 'transparent';
-        download.style.color = 'white';
-        download.innerHTML = `
-            <i class="fa-solid fa-download ${mode}-header_download-icon"/>
-            <span class="${mode}-header__download-text">下载</span>
-        `;
-
-        download.addEventListener('click', async function () {
-            download.innerHTML = `
-                <i class="fa-solid fa-spinner fa-spin-pulse ${mode}-header_download-icon"></i>
-                <span class="${mode}-header__download-text">下载中...</span>
-            `;
-            await listener();
-            download.innerHTML = `
-                <i class="fa-solid fa-check ${mode}-header_download-icon"/>
-                <span class="${mode}-header__download-text">下载/推送完成</span>
-            `;
-        }, { once: true });
-
-        header.appendChild(settings);
-        header.appendChild(download);
-    } else if (mode !== undefined) {
-        alert('未找到插入位置, 请将本页源代码发送给开发者以解决此问题');
-    }
-
-    function showDialog() {
+    function showSettingsDialog() {
         swal.fire({
             title: '设置', html: `
                 <div>
@@ -253,7 +248,7 @@ async function main() {
                 </div>
                 <div>
                     <label for="dir">下载目录</label>
-                    <i class="fa-solid fa-info-circle" title="支持的变量:
+                    <i class="fa-solid fa-info-circle" title="支持的占位符:
                      {service}: 服务器, 如fanbox
                      {artist_id}: 作者ID
                      {date}: 发布时间
@@ -263,14 +258,18 @@ async function main() {
                      {index0}: 从0开始的序号。cover将编号为0
                      {index}: 从1开始的序号。cover的编号为空白
                      {auto_named}: 当文件名为uuid时将使用空命名。否则使用文件名
-                     {name}: 文件名 
+                     {name}: 文件名
                      {extension}: 文件扩展名。必须带有此项
                      {js:...#}: js代码. 可用参数请参考源代码85行处formatDir方法"></i>
                     <textarea cols="20" id="dir">${data.dir}</textarea>
                 </div>
                 <div>
+                    <label for="save-sourcedata">保存原始数据</label>
+                    <input type="checkbox" id="save-sourcedata" ${data.saveSource ? 'checked' : ''} >
+                </div>
+                <div>
                     <label for="vimMode">Vim模式</label>
-                    <input type="checkbox" id="vimMode" checked="${data.vimMode}">
+                    <input type="checkbox" id="vimMode" ${data.vimMode ? 'checked' : ''}>
                 </div>
             `, showCancelButton: true, confirmButtonText: '保存', cancelButtonText: '取消'
         }).then((result) => {
@@ -279,11 +278,135 @@ async function main() {
                 data.token = document.getElementById('token').value;
                 data.dir = document.getElementById('dir').value;
                 data.vimMode = document.getElementById('vimMode').checked;
+                data.saveSource = document.getElementById('save-sourcedata').checked;
                 location.reload();
             }
         });
     }
 
+    function showDownloadDialog() {
+        swal.fire({
+            title: '下载选项', html: `
+                <div>
+                    <label for="final-dir">下载目录</label>
+                    <textarea cols="20" id="final-dir">${data.dir}</textarea>
+                </div>
+                <div>
+                    <label for="save-sourcedata-final">保存原始数据</label>
+                    <input type="checkbox" id="save-sourcedata-final" ${data.saveSource ? 'checked' : ''} >
+                </div>
+                <div>
+                    <label for="date-after">时间上限(较早日期)</label>
+                    <input type="datetime-local" id="date-after" value="${new Date(0).toDateInputString()}">
+                </div>
+                <div>
+                    <label for="date-before">时间下限(较晚日期)</label>
+                    <input type="datetime-local" id="date-before" value="${new Date().toDateInputString()}">
+                </div>
+                <div>
+                    <label for="regex">正则检查标题</label>
+                    <input type="text" id="regex" value="">
+                </div>
+                <div>
+                    <label for="extension">保留扩展名</label>
+                    <input type="text" id="extension" value="*" placeholder="rar,zip,jpg">
+                </div>
+                <div>
+                    <label for="costomize-js">自定义JS</label>
+                    <textarea cols="20" id="customize-js"></textarea>
+                </div>
+            `, showCancelButton: true, confirmButtonText: '下载', cancelButtonText: '取消'
+        }).then(async (result) => {
+            if (result.isConfirmed) {
+                await listener({
+                    pattern: document.getElementById('final-dir').value,
+                    after: document.getElementById('date-after').value,
+                    before: document.getElementById('date-before').value,
+                    regex: document.getElementById('regex').value,
+                    extension: document.getElementById('extension').value.split(','),
+                    js: document.getElementById('customize-js').value,
+                    saveSource: document.getElementById('save-sourcedata-final').checked,
+                });
+                swal.fire({title: '下载任务已添加', icon: 'success'});
+            }
+        })
+    }
+
+    let mode;
+    let header
+    let listener;
+    if (window.location.href.match(/\/user\/\w+\/post\/\w+\/revision\/\w+/)) {
+        mode = 'post';
+        header = document.querySelector('.post__actions');
+        listener = async (p) => {
+            let revisions = await (await fetch(`/api/v1${window.location.pathname.replace(/revision\/\w+/, "revisions")}`)).json()
+            let revision = window.location.pathname.split("/").at(-1)
+            await downloadPostContent(revisions.find(v => v.revision_id.toString() === revision), p)
+        }
+    } else if (window.location.href.match(/\/user\/\w+\/post\/\w+/)) {
+        mode = 'post';
+        header = document.querySelector('.post__actions');
+        listener = async (p) => await downloadPostContent((await (await fetch(`/api/v1${window.location.pathname}`)).json()).post, p)
+    } else if (window.location.href.match(/\/user\/\w+/)) {
+        mode = 'user';
+        header = document.querySelector('.user-header__actions');
+        listener = async (p) => {
+            for (let post of await getPosts(window.location.pathname)) await downloadPostContent(post, p)
+        }
+    } else if (window.location.href.match(/\/favorites/)) {
+        mode = 'favor';
+        const content = document.querySelector('.site-section.site-section--favorites');
+        header = document.createElement('div');
+        header.classList.add(`favorites-header__actions`);
+        header.style.display = 'flex';
+        header.style.justifyContent = 'center';
+        content.insertBefore(header, content.querySelector('form#filter-favorites').nextSibling);
+        const type = window.location.href.match(/\/favorites\/(\w+)/).pop();
+        listener = async (p) => {
+            const posts = type === 'post'
+                ? await (await fetch(`/api/v1/account/favorites?type=post`)).json()
+                : await (async () => {
+                    const response = await fetch(`/api/v1/account/favorites?type=artist`)
+                    const result = []
+                    for (const artist of await response.json()) {
+                        result.push(...await getPosts(`${artist.service}/user/${artist.id}`))
+                    }
+                    return result;
+                })()
+            for (let post of posts) await downloadPostContent(post, p)
+        }
+    }
+
+    if (header) {
+        const settings = document.createElement('button');
+        settings.classList.add(`${mode}-header__settings`);
+        settings.style.backgroundColor = 'transparent';
+        settings.style.borderColor = 'transparent';
+        settings.style.color = 'white';
+        settings.innerHTML = `
+            <i class="fa-solid fa-gear ${mode}-header_settings-icon"/>
+        `;
+        settings.addEventListener('click', showSettingsDialog);
+
+        const download = document.createElement('button');
+        download.classList.add(`${mode}-header__download`);
+        download.style.backgroundColor = 'transparent';
+        download.style.borderColor = 'transparent';
+        download.style.color = 'white';
+        download.innerHTML = `
+            <i class="fa-solid fa-download ${mode}-header_download-icon"/>
+            <span class="${mode}-header__download-text">下载</span>
+        `;
+
+        download.addEventListener('click', showDownloadDialog);
+
+        header.appendChild(settings);
+        header.appendChild(download);
+        return mode;
+    } else if (mode !== undefined) {
+        alert('未找到插入位置, 请将本页源代码发送给开发者以解决此问题');
+        return undefined
+    }
 }
 
 async function replaceAsync(str, regex, asyncFn) {
@@ -311,10 +434,10 @@ async function getKemonoUrl(url) {
                     if (response.status === 200) {
                         resolve(JSON.parse(response.responseText))
                     } else {
-                        reject({ status: response.status, statusText: response.statusText })
+                        reject({status: response.status, statusText: response.statusText})
                     }
                 }, onerror: function (response) {
-                    reject({ status: response.status, statusText: response.statusText })
+                    reject({status: response.status, statusText: response.statusText})
                 }
             })
         })
@@ -364,7 +487,7 @@ async function getKemonoUrl(url) {
         service = "patreon"
         post = url.match(patreon_post2)[1]
     } else {
-        return null;
+        return [undefined, undefined, undefined];
     }
 
     return [service, id, post]
@@ -379,7 +502,7 @@ async function getPosts(path, order = 0) {
             await new Promise(resolve => setTimeout(resolve, 60000))
             continue;
         }
-        if (response.status !== 200) throw { status: response.status, statusText: response.statusText }
+        if (response.status !== 200) throw {status: response.status, statusText: response.statusText}
         const items = await response.json();
         posts.push(...items);
         if (items.length < 50) break;
@@ -400,11 +523,11 @@ async function downloadContent(rpc, token, file, ...url) {
     const out = file.slice(dir.length);
     const params = token === undefined
         ? out === ""
-            ? [url, { "dir": dir }]
-            : [url, { "dir": dir, "out": out }]
+            ? [url, {"dir": dir}]
+            : [url, {"dir": dir, "out": out}]
         : out === ""
-            ? [`token:${token}`, url, { "dir": dir }]
-            : [`token:${token}`, url, { "dir": dir, "out": out }]
+            ? [`token:${token}`, url, {"dir": dir}]
+            : [`token:${token}`, url, {"dir": dir, "out": out}]
     return new Promise((resolve) => {
         GM_xmlhttpRequest({
             method: "POST", url: rpc, data: JSON.stringify({
@@ -433,13 +556,21 @@ async function fetchDownloadDir(rpc, token) {
                 if (response.status === 200) {
                     resolve(JSON.parse(response.responseText))
                 } else {
-                    reject({ status: response.status, statusText: response.statusText })
+                    reject({status: response.status, statusText: response.statusText})
                 }
             }, onerror: function (response) {
-                reject({ status: response.status, statusText: response.statusText })
+                reject({status: response.status, statusText: response.statusText})
             }
         })
     }).then(function (result) {
         return result.result.dir;
     })
+}
+
+String.prototype.isEmpty = function() {
+    return (this.length === 0 || !this.trim())
+}
+
+Date.prototype.toDateInputString = function () {
+    return this.toISOString().slice(0, 16)
 }
