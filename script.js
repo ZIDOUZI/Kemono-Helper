@@ -198,7 +198,11 @@ async function main() {
     if (window.location.href.match(/\/user\/\w+\/post\/\w+/)) {
         mode = 'post';
         header = document.querySelector('.post__actions');
-        listener = async () => await downloadPostContent(await (await fetch(`/api/v1${window.location.pathname}`)).json())
+        listener = async () => {
+            const apiUrl = `${window.location.origin}/api/v1${window.location.pathname}`;
+            const post = await safeFetch(apiUrl);
+            await downloadPostContent(post);
+        }
     } else if (window.location.href.match(/\/user\/\w+/)) {
         mode = 'user';
         header = document.querySelector('.user-header__actions');
@@ -215,11 +219,11 @@ async function main() {
             // 修复收藏页下载逻辑：根据当前选中的类型决定下载内容（感谢 Tempale Nico, PicLover 反馈）
             const isPostSelected = postOption ? postOption.selected : false;
             const posts = isPostSelected
-                ? await (await fetch(`/api/v1/account/favorites?type=post`)).json()
+                ? await safeFetch(`${window.location.origin}/api/v1/account/favorites?type=post`)
                 : await (async () => {
-                    const response = await fetch(`/api/v1/account/favorites?type=artist`)
+                    const artists = await safeFetch(`${window.location.origin}/api/v1/account/favorites?type=artist`)
                     const result = []
-                    for (const artist of await response.json()) {
+                    for (const artist of artists) {
                         result.push(...await getPosts(`${artist.service}/user/${artist.id}`))
                     }
                     return result;
