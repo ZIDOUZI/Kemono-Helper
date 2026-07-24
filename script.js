@@ -5,6 +5,8 @@
 // @author       ZIDOUZI
 // @match        https://*.kemono.party/*
 // @match        https://*.kemono.su/*
+// @match        https://*.kemono.cr/*
+// @match        https://*.nekohouse.su/*
 // @icon         https://kemono.su/static/favicon.ico
 // @require      https://cdn.jsdelivr.net/npm/sweetalert2@11
 // @require      https://kit.fontawesome.com/101092ae56.js
