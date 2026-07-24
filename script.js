@@ -115,7 +115,15 @@ async function main() {
 
     const postContent = document.querySelector('.post__content')
     if (postContent) {
-        replaceAsync(postContent.innerHTML, /(?<!a href="|<a [^>]+">)(https?:\/\/[^\s<]+)/g, async function (match) {
+        // 保护 iframe 内容不被替换（感谢 nd002723 反馈）
+        const iframePlaceholders = [];
+        let html = postContent.innerHTML.replace(/<iframe[\s\S]*?<\/iframe>/gi, function (match) {
+            const idx = iframePlaceholders.length;
+            iframePlaceholders.push(match);
+            return `<!--IFRAME_PLACEHOLDER_${idx}-->`;
+        });
+
+        replaceAsync(html, /(?<!a href="|<a [^>]+">)(https?:\/\/[^\s<]+)/g, async function (match) {
             let [service, id, post] = await getKemonoUrl(match);
             if (service === null) return `<a href="${match}" target="_blank">${match}</a>`;
             id = id || window.location.href.match(/\/user\/(\d+)/)[1];
@@ -123,6 +131,10 @@ async function main() {
             const url = `${service}/user/${id}${post ? `/post/${post}` : ""}`;
             return `<a href="https://${domain}/${url}" target="_self">[已替换]${match}</a>`;
         }).then(function (result) {
+            // 恢复 iframe 内容
+            result = result.replace(/<!--IFRAME_PLACEHOLDER_(\d+)-->/g, function (_, idx) {
+                return iframePlaceholders[parseInt(idx)];
+            });
             postContent.innerHTML = result
                 .replace(/<a href="(https:\/\/[^\s<]+)">\1<\/a>\n?(#[^\s<]+)/g, `<a href="$1$2">$1$2</a>`)
                 .replace(/<a href="(https:\/\/[^\s<]+)">(.*?)<\/a>\n?(#[^\s<]+)/g, `<a href="$1$3">$2</a>`)
@@ -196,9 +208,13 @@ async function main() {
     } else if (window.location.href.match(/\/favorites/)) {
         mode = 'favor';
         header = document.querySelector('.dropdowns');
-        const type = document.querySelector('.dropdowns>select:nth-child(2)>option:nth-child(1)');
+        const typeSelect = document.querySelector('.dropdowns>select:nth-child(2)');
+        // 第一个 option 是 post，第二个是 artist
+        const postOption = typeSelect ? typeSelect.querySelector('option:nth-child(1)') : null;
         listener = async () => {
-            const posts = type.selected !== true
+            // 修复收藏页下载逻辑：根据当前选中的类型决定下载内容（感谢 Tempale Nico, PicLover 反馈）
+            const isPostSelected = postOption ? postOption.selected : false;
+            const posts = isPostSelected
                 ? await (await fetch(`/api/v1/account/favorites?type=post`)).json()
                 : await (async () => {
                     const response = await fetch(`/api/v1/account/favorites?type=artist`)
