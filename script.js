@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Kemono助手
-// @version      2.0.18
+// @version      2.3.0
 // @description  提供更好的Kemono使用体验
 // @author       ZIDOUZI
 // @match        https://*.kemono.party/*
