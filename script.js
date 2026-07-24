@@ -82,7 +82,7 @@ async function main() {
                     || (/^[a-zA-Z0-9]+$/.test(name) && post.service === "fanbox") || name.length + extension.length > 255;
                 if (name.length + extension.length > 255) name = name.slice(0, 255 - extension.length);
                 return _dir
-                    .replaceAll(/\{js:(.*)#}/g, function (_, code) {
+                    .replaceAll(/\{js:(.*?)#}/g, function (_, code) {
                         return eval(code);
                     })
                     .replaceAll(/[\/\\]/g, '≸∱').replaceAll(':', '∱≸')
@@ -107,7 +107,7 @@ async function main() {
                     .replaceAll('|', '｜')
                     .replaceAll('/', '／')
                     .replaceAll('\\', '＼')
-                    .replaceAll('≸∱', '\\').replace('∱≸', ':')
+                    .replaceAll('≸∱', '\\').replaceAll('∱≸', ':')
                     .replaceAll(/[\s.]+\\/g, '\\'); // remove space and dot
             }
         }
@@ -162,10 +162,19 @@ async function main() {
     }
 
     async function downloadPostContent(post) {
-        if (Object.keys(post.file).length !== 0) post.attachments.unshift(post.file)
+        // 避免重复添加已在附件列表中的封面图（感谢 jacklee0708 反馈）
+        if (Object.keys(post.file).length !== 0) {
+            const firstAttachment = post.attachments[0];
+            if (!firstAttachment || firstAttachment.path !== post.file.path) {
+                post.attachments.unshift(post.file);
+            }
+        }
         const padStart = Math.max(3, post.attachments.length.toString().length);
         for (let [i, { name, path }] of post.attachments.entries()) {
-            const extension = path.split('.').pop();
+            // 处理旧资源没有 name 的情况（感谢 mitsukaze 反馈）
+            if (!name) name = Math.floor(Math.random() * 1000000) + "_random";
+            // 从原始文件名获取扩展名，比从 path 获取更准确（感谢 Rui DSaaCC 反馈）
+            const extension = name.includes('.') ? name.split('.').pop() : path.split('.').pop();
             const filename = name.replace(/\.\w+$/, '');
             await downloadContent(data.rpc, data.token, data.formatDir(post, i, filename, extension, padStart), `https://${domain}/data${path}`);
         }
