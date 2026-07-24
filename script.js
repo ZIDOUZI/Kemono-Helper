@@ -372,21 +372,87 @@ async function getKemonoUrl(url) {
     return [service, id, post]
 }
 
+async function safeFetch(url) {
+    let attempts = 0;
+    const maxAttempts = 5;
+
+    while (attempts < maxAttempts) {
+        attempts++;
+        try {
+            const _fetch = typeof unsafeWindow !== 'undefined' ? unsafeWindow.fetch : fetch;
+            const response = await _fetch(url, {
+                method: "GET",
+                credentials: "include",
+                headers: {
+                    "Accept": "text/css",
+                    "User-Agent": navigator.userAgent,
+                    "Referer": window.location.href,
+                    "Origin": window.location.origin,
+                    "Accept-Language": navigator.language || "zh-CN,zh;q=0.9",
+                    "Sec-Fetch-Site": "same-origin",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Dest": "empty",
+                    "Cache-Control": "no-cache",
+                    "Pragma": "no-cache"
+                },
+                cache: "no-store"
+            });
+
+            if (response.ok) {
+                const text = await response.text();
+                return JSON.parse(text);
+            } else if (response.status === 429) {
+                // rate limited, wait longer
+                console.warn(`[Kemono助手] 被限速，等待60秒后重试...`);
+                await new Promise(r => setTimeout(r, 60000));
+                attempts--; // don't count rate-limit against retry count
+            } else {
+                throw new Error(`HTTP ${response.status}`);
+            }
+        } catch (e) {
+            console.warn(`[Kemono助手] 第 ${attempts} 次请求失败 (${url}) → ${e.message}`);
+            if (attempts < maxAttempts) {
+                const delay = 1500 + Math.random() * 1000;
+                await new Promise(r => setTimeout(r, delay));
+            } else {
+                throw e;
+            }
+        }
+    }
+}
+
 async function getPosts(path, order = 0) {
     let posts = [];
+    const base = window.location.origin;
+    const pageSize = 25;
+
+    let cleanPath = path.replace(/^\/+|\/+$/g, '');
+
     while (true) {
-        const response = await fetch(`/api/v1/${path}?o=${order}`)
-        // TODO: 429 too many requests, 80 request per minute
-        if (response.status === 429) {
-            await new Promise(resolve => setTimeout(resolve, 60000))
-            continue;
+        const apiUrl = `${base}/api/v1/${cleanPath}/posts?o=${order}`;
+        console.log(`[Kemono助手] 正在请求 → ${apiUrl}`);
+
+        let data;
+        try {
+            data = await safeFetch(apiUrl);
+        } catch (e) {
+            console.error(`[Kemono助手] ${apiUrl} 最终失败 → ${e.message}`);
+            break;
         }
-        if (response.status !== 200) throw { status: response.status, statusText: response.statusText }
-        const items = await response.json();
-        posts.push(...items);
-        if (items.length < 50) break;
-        order += items.length;
+
+        if (!data || !Array.isArray(data) || data.length === 0) {
+            console.log(`[Kemono助手] 获取完成！共 ${posts.length} 个帖子`);
+            break;
+        }
+
+        posts = posts.concat(data);
+        order += data.length;
+
+        // 请求间延迟，避免触发限速
+        await new Promise(r => setTimeout(r, 1600 + Math.random() * 900));
+        if (data.length < pageSize) break;
     }
+
     return posts;
 }
 
