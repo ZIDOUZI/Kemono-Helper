@@ -15,7 +15,7 @@
 1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 或其他用户脚本管理器
 2. 安装本脚本
 3. 安装 [Motrix](https://motrix.app/) 或 [Aria2NG](https://github.com/mayswind/AriaNg)，确保 Aria2 RPC 服务已启动
-4. 访问 kemono 作者页/帖子页/收藏页，点击**下载按钮**
+4. 访问 kemono / pawchive 作者页/帖子页/收藏页，点击**下载按钮**
 5. 首次使用请点击**齿轮按钮**进行设置：
    - **Motrix**: RPC 地址填写 `http://localhost:16800/jsonrpc`
    - **Aria2NG**: RPC 地址填写 `http://localhost:6800/jsonrpc`
@@ -53,6 +53,11 @@
 - `kemono.su`
 - `kemono.cr`
 - `nekohouse.su`
+- `pawchive.pw`
+- `pawchive.st`
+
+**注意**: pawchive 的站点与文件服务器是分开的（文件存放在 `file.pawchive.pw`），脚本会自动使用正确的下载地址；
+pawchive 上尚未归档（preview only）的帖子没有可下载的文件，批量下载时会自动跳过。
 
 ## 安装
 
@@ -68,7 +73,7 @@
 - **PicLover** — 测试并确认 headers 修复有效
 - **ChaseTheLight G (追光)** — 发现并修复正则贪婪匹配 bug，提交 PR
 - **mitsukaze** — 发现 null name 崩溃问题并提供修复代码
-- **nd002723** — 反馈 iframe 内链接被替换问题
+- **nd002723** — 反馈 iframe 内链接被替换问题；其 Pawchive助手 的站点与接口实现为本脚本的 pawchive 支持提供参考
 - **jacklee0708** — 反馈封面图重复下载问题
 - **Rui DSaaCC** — 反馈 .z01 扩展名解析和 .rar/.bin 问题
 - **Tempale Nico** — 反馈收藏页下载逻辑错误
@@ -82,7 +87,7 @@
 - **poixay** — 反馈 {date} 占位符多次使用问题
 - **Utawa** — 反馈多版本帖子下载和 Linux 路径问题
 - **洛青羽** — 反馈 Motrix 下载速度问题
-- **kkrt1** — 反馈 PSD 文件不识别和文本保存需求
+- **kkrt1** — 反馈 PSD 文件不识别、文本保存需求，并建议支持 pawchive
 - **林昊飞**、**345fe35f4a3f4** — 反馈批量下载 403 错误
 - **Slevin Wong**、**LONK**、**F6FBrickat**、**GFgatus**、**Wav vii** — 功能建议和支持
 

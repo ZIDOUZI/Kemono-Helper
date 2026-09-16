@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Kemono助手
-// @version      2.3.0
-// @description  提供更好的Kemono使用体验
+// @version      2.4.0
+// @description  提供更好的 Kemono / Pawchive 使用体验
 // @author       ZIDOUZI
 // @match        https://*.kemono.party/*
 // @match        https://*.kemono.su/*
 // @match        https://*.kemono.cr/*
 // @match        https://*.nekohouse.su/*
+// @match        https://pawchive.pw/*
+// @match        https://pawchive.st/*
 // @icon         https://kemono.su/static/favicon.ico
 // @require      https://cdn.jsdelivr.net/npm/sweetalert2@11
 // @require      https://kit.fontawesome.com/101092ae56.js
@@ -19,6 +21,34 @@
 // @namespace https://greasyfork.org/users/448292
 // ==/UserScript==
 
+let kemonoHelperMenuId;
+
+// 键盘导航只需绑定一次，但翻页按钮每次都要重新获取（页面会局部刷新）
+let keyboardNavigationBound = false;
+
+// 页面变化监听只需初始化一次
+let pageWatcherInitialized = false;
+
+// 等待插入位置出现的轮询只允许有一个
+let buttonPollRunning = false;
+
+/**
+ * 获取站点对应的文件服务器域名
+ * pawchive 的站点与文件服务器是分开的，文件存放在 file.pawchive.pw
+ * @param {string} domain
+ */
+function getFileDomain(domain) {
+    if (/(^|\.)pawchive\.(pw|st)$/i.test(domain)) return 'file.pawchive.pw';
+    return domain;
+}
+
+/**
+ * 页面是否由前端渲染（此时首屏可能还没有正文和按钮的插入位置）
+ */
+function isClientRenderedPage() {
+    return !!document.querySelector('#root:empty, #app:empty');
+}
+
 (async function () {
     'use strict';
     await main().catch(function (error) {
@@ -29,11 +59,16 @@
 
 async function main() {
 
+    const isFirstRun = !pageWatcherInitialized;
+
     const language = navigator.language || navigator.userLanguage;
 
     const domain = window.location.href.match(/https:\/\/([^/]+)/)[1];
 
-    const menuId = GM_registerMenuCommand('Kemono助手设置', showDialog);
+    const fileDomain = getFileDomain(domain);
+
+    if (kemonoHelperMenuId !== undefined) GM_unregisterMenuCommand(kemonoHelperMenuId);
+    kemonoHelperMenuId = GM_registerMenuCommand('Kemono助手设置', showDialog);
 
     const data = await (async () => {
         let _vimMode = GM_getValue('vimMode', false)
@@ -113,8 +148,10 @@ async function main() {
         }
     })()
 
-    const postContent = document.querySelector('.post__content')
-    if (postContent) {
+    // pawchive 的正文容器是 .post__body，kemono 是 .post__content
+    const postContent = document.querySelector('.post__content') || document.querySelector('.post__body')
+    if (postContent && !postContent.hasAttribute('data-kemono-helper-rewritten')) {
+        postContent.setAttribute('data-kemono-helper-rewritten', '1');
         // 保护 iframe 内容不被替换（感谢 nd002723 反馈）
         const iframePlaceholders = [];
         let html = postContent.innerHTML.replace(/<iframe[\s\S]*?<\/iframe>/gi, function (match) {
@@ -138,23 +175,20 @@ async function main() {
             postContent.innerHTML = result
                 .replace(/<a href="(https:\/\/[^\s<]+)">\1<\/a>\n?(#[^\s<]+)/g, `<a href="$1$2">$1$2</a>`)
                 .replace(/<a href="(https:\/\/[^\s<]+)">(.*?)<\/a>\n?(#[^\s<]+)/g, `<a href="$1$3">$2</a>`)
+        }).catch(function (error) {
+            console.log(error)
         })
     }
 
-    const prev = document.querySelector(".post__nav-link.prev");
-    if (prev) {
+    // 键盘导航：翻页按钮每次从文档里重新获取，避免页面局部刷新后失效
+    if (!keyboardNavigationBound && (document.querySelector(".post__nav-link.prev") || document.querySelector(".post__nav-link.next"))) {
+        keyboardNavigationBound = true;
         document.addEventListener("keydown", function (e) {
             if (e.key === "Right" || e.key === "ArrowRight" || data.vimMode && (e.key === "h" || e.key === "H")) {
-                prev.click();
+                document.querySelector(".post__nav-link.prev")?.click();
             }
-        });
-    }
-
-    const next = document.querySelector(".post__nav-link.next");
-    if (next) {
-        document.addEventListener("keydown", function (e) {
             if (e.key === "Left" || e.key === "ArrowLeft" || data.vimMode && (e.key === "l" || e.key === "L")) {
-                next.click();
+                document.querySelector(".post__nav-link.next")?.click();
             }
         });
     }
@@ -174,22 +208,81 @@ async function main() {
     }
 
     async function downloadPostContent(post) {
-        // 避免重复添加已在附件列表中的封面图（感谢 jacklee0708 反馈）
-        if (Object.keys(post.file).length !== 0) {
-            const firstAttachment = post.attachments[0];
-            if (!firstAttachment || firstAttachment.path !== post.file.path) {
-                post.attachments.unshift(post.file);
-            }
+        // pawchive 上尚未归档(preview_state=pending)的帖子在文件服务器上是 403，直接跳过
+        // kemono 的接口没有该字段，行为不变
+        if (post.preview_state !== undefined && post.preview_state !== 'scraped') {
+            console.log(`[Kemono助手] 跳过未归档的帖子 ${post.id} (preview_state=${post.preview_state})`);
+            return;
         }
-        const padStart = Math.max(3, post.attachments.length.toString().length);
-        for (let [i, { name, path }] of post.attachments.entries()) {
+        // 收集封面和附件并去重，跳过未归档（没有文件）的帖子（感谢 jacklee0708 反馈）
+        const attachments = [];
+        for (const file of [post.file, ...(post.attachments || [])]) {
+            if (!file || !file.path) continue;
+            if (attachments.some(exist => exist.path === file.path)) continue;
+            attachments.push(file);
+        }
+        if (attachments.length === 0) return;
+        const padStart = Math.max(3, attachments.length.toString().length);
+        for (const [i, { name: fileName, path }] of attachments.entries()) {
             // 处理旧资源没有 name 的情况（感谢 mitsukaze 反馈）
-            if (!name) name = Math.floor(Math.random() * 1000000) + "_random";
+            const name = fileName || Math.floor(Math.random() * 1000000) + "_random";
             // 从原始文件名获取扩展名，比从 path 获取更准确（感谢 Rui DSaaCC 反馈）
             const extension = name.includes('.') ? name.split('.').pop() : path.split('.').pop();
             const filename = name.replace(/\.\w+$/, '');
-            await downloadContent(data.rpc, data.token, data.formatDir(post, i, filename, extension, padStart), `https://${domain}/data${path}`);
+            await downloadContent(data.rpc, data.token, data.formatDir(post, i, filename, extension, padStart), `https://${fileDomain}/data${path}`);
         }
+    }
+
+    /**
+     * 创建页头上的按钮
+     * @param {string} action 按钮名，同时决定样式类名
+     * @param {string} iconClass fontawesome 图标类名
+     * @param {string} text 按钮文字
+     */
+    function createHeaderButton(action, iconClass, text = '') {
+        const button = document.createElement('button');
+        button.classList.add('kemono-helper-button', `${mode}-header__${action}`);
+        button.style.backgroundColor = 'transparent';
+        button.style.borderColor = 'transparent';
+        button.style.color = 'white';
+        button.innerHTML = `
+            <i class="fa-solid ${iconClass} ${mode}-header_${action}-icon"></i>
+            ${text ? `<span class="${mode}-header__${action}-text">${text}</span>` : ''}
+        `;
+        return button;
+    }
+
+    /**
+     * 收藏页的操作栏
+     * kemono 使用 .dropdowns，pawchive 等新前端没有该元素，需要自行插入
+     */
+    function getFavoritesHeader() {
+        const exist = document.querySelector('.dropdowns') || document.querySelector('.favorites-header__actions');
+        if (exist) return exist;
+        const content = document.querySelector('.site-section.site-section--favorites');
+        if (!content) return null;
+        const actions = document.createElement('div');
+        actions.classList.add('favorites-header__actions');
+        actions.style.display = 'flex';
+        actions.style.justifyContent = 'center';
+        const filterForm = content.querySelector('form#filter-favorites, form.dropdowns');
+        content.insertBefore(actions, filterForm ? filterForm.nextSibling : content.firstChild);
+        return actions;
+    }
+
+    /**
+     * 收藏页当前选中的类型
+     * kemono 的第一个 option 是 post，第二个是 artist
+     * pawchive 使用 type 查询参数或 select[name="type"]
+     */
+    function getFavoritesType() {
+        const select = document.querySelector('.dropdowns>select:nth-child(2), select[name="type"]');
+        const firstOption = select ? select.querySelector('option:nth-child(1)') : null;
+        if (firstOption) return firstOption.selected ? 'post' : 'artist';
+        return new URLSearchParams(window.location.search).get('type')
+            || select?.value
+            || window.location.pathname.match(/\/favorites\/(\w+)/)?.[1]
+            || 'artist';
     }
 
     let mode;
@@ -200,8 +293,8 @@ async function main() {
         header = document.querySelector('.post__actions');
         listener = async () => {
             const apiUrl = `${window.location.origin}/api/v1${window.location.pathname}`;
-            const post = await safeFetch(apiUrl);
-            await downloadPostContent(post);
+            const result = await safeFetch(apiUrl);
+            await downloadPostContent(result.post || result);
         }
     } else if (window.location.href.match(/\/user\/\w+/)) {
         mode = 'user';
@@ -211,13 +304,10 @@ async function main() {
         }
     } else if (window.location.href.match(/\/favorites/)) {
         mode = 'favor';
-        header = document.querySelector('.dropdowns');
-        const typeSelect = document.querySelector('.dropdowns>select:nth-child(2)');
-        // 第一个 option 是 post，第二个是 artist
-        const postOption = typeSelect ? typeSelect.querySelector('option:nth-child(1)') : null;
+        header = getFavoritesHeader();
         listener = async () => {
             // 修复收藏页下载逻辑：根据当前选中的类型决定下载内容（感谢 Tempale Nico, PicLover 反馈）
-            const isPostSelected = postOption ? postOption.selected : false;
+            const isPostSelected = getFavoritesType() === 'post';
             const posts = isPostSelected
                 ? await safeFetch(`${window.location.origin}/api/v1/account/favorites?type=post`)
                 : await (async () => {
@@ -233,41 +323,38 @@ async function main() {
     }
 
     if (header) {
-        const settings = document.createElement('button');
-        settings.classList.add(`${mode}-header__settings`);
-        settings.style.backgroundColor = 'transparent';
-        settings.style.borderColor = 'transparent';
-        settings.style.color = 'white';
-        settings.innerHTML = `
-            <i class="fa-solid fa-gear ${mode}-header_settings-icon"/>
-        `;
+        // 页面局部刷新后先移除旧按钮，避免重复插入
+        header.querySelectorAll('.kemono-helper-button').forEach(button => button.remove());
+
+        const settings = createHeaderButton('settings', 'fa-gear');
         settings.addEventListener('click', showDialog);
 
-        const download = document.createElement('button');
-        download.classList.add(`${mode}-header__download`);
-        download.style.backgroundColor = 'transparent';
-        download.style.borderColor = 'transparent';
-        download.style.color = 'white';
-        download.innerHTML = `
-            <i class="fa-solid fa-download ${mode}-header_download-icon"/>
-            <span class="${mode}-header__download-text">下载</span>
-        `;
+        const download = createHeaderButton('download', 'fa-download', '下载');
 
         download.addEventListener('click', async function () {
             download.innerHTML = `
                 <i class="fa-solid fa-spinner fa-spin-pulse ${mode}-header_download-icon"></i>
                 <span class="${mode}-header__download-text">下载中...</span>
             `;
-            await listener();
-            download.innerHTML = `
-                <i class="fa-solid fa-check ${mode}-header_download-icon"/>
-                <span class="${mode}-header__download-text">下载/推送完成</span>
-            `;
+            try {
+                await listener();
+                download.innerHTML = `
+                    <i class="fa-solid fa-check ${mode}-header_download-icon"></i>
+                    <span class="${mode}-header__download-text">下载/推送完成</span>
+                `;
+            } catch (error) {
+                console.log(error);
+                download.innerHTML = `
+                    <i class="fa-solid fa-triangle-exclamation ${mode}-header_download-icon"></i>
+                    <span class="${mode}-header__download-text">下载失败</span>
+                `;
+                alert(`Kemono助手发生错误: ${error.status ?? ''} ${error.statusText ?? error.message ?? error}`);
+            }
         }, { once: true });
 
         header.appendChild(settings);
         header.appendChild(download);
-    } else if (mode !== undefined) {
+    } else if (mode !== undefined && isFirstRun && !isClientRenderedPage()) {
         alert('未找到插入位置, 请将本页源代码发送给开发者以解决此问题');
     }
 
@@ -313,6 +400,37 @@ async function main() {
                 location.reload();
             }
         });
+    }
+
+    // 页面通过 htmx 局部刷新或前端路由切换后重新初始化（pawchive 与 kemono 新前端）
+    let reinitTimer;
+    const scheduleReinit = function () {
+        clearTimeout(reinitTimer);
+        reinitTimer = setTimeout(function () {
+            main().catch(function (error) { console.log(error) });
+        }, 100);
+    };
+    if (isFirstRun) {
+        pageWatcherInitialized = true;
+        document.addEventListener('htmx:afterSettle', scheduleReinit);
+        window.addEventListener('popstate', scheduleReinit);
+    }
+
+    // 前端渲染的页面首屏可能还没有按钮的插入位置，轮询等待（最多约 20 秒）
+    if (mode !== undefined && !document.querySelector('.kemono-helper-button') && !buttonPollRunning) {
+        buttonPollRunning = true;
+        let attempts = 0;
+        const poll = setInterval(function () {
+            if (document.querySelector('.kemono-helper-button') || ++attempts > 40) {
+                clearInterval(poll);
+                buttonPollRunning = false;
+                if (!document.querySelector('.kemono-helper-button')) {
+                    alert('未找到插入位置, 请将本页源代码发送给开发者以解决此问题');
+                }
+                return;
+            }
+            scheduleReinit();
+        }, 500);
     }
 
 }
